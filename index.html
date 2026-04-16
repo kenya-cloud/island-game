@@ -1,0 +1,1580 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#0a1929">
+<title>Island</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body {
+    width: 100%; height: 100%;
+    background: #0a1929;
+    overflow: hidden;
+    touch-action: none;
+    user-select: none;
+    -webkit-user-select: none;
+    -webkit-tap-highlight-color: transparent;
+    font-family: -apple-system, system-ui, sans-serif;
+    color: #fff;
+    overscroll-behavior: none;
+  }
+  #game {
+    display: block;
+    width: 100vw;
+    height: 100vh;
+    image-rendering: pixelated;
+    image-rendering: crisp-edges;
+  }
+  #dialog {
+    position: fixed;
+    left: 50%;
+    bottom: 24px;
+    transform: translateX(-50%);
+    width: min(560px, 90vw);
+    background: rgba(10, 25, 41, 0.92);
+    padding: 14px 18px 12px;
+    border-radius: 12px;
+    border: 2px solid rgba(255,255,255,0.18);
+    font-size: 15px;
+    line-height: 1.45;
+    display: none;
+    z-index: 10;
+    box-shadow: 0 6px 24px rgba(0,0,0,0.4);
+  }
+  #dialog.show { display: block; }
+  #dialog .name { font-weight: bold; color: #ffd57a; display: block; margin-bottom: 4px; font-size: 13px; }
+  #dialog .hint { display: block; margin-top: 8px; font-size: 11px; opacity: 0.55; }
+  #hint {
+    position: fixed;
+    top: 16px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: rgba(0,0,0,0.55);
+    padding: 8px 14px;
+    border-radius: 8px;
+    font-size: 13px;
+    opacity: 0;
+    transition: opacity 0.4s;
+    pointer-events: none;
+    z-index: 10;
+    white-space: nowrap;
+  }
+  #hint.show { opacity: 1; }
+  #joystick {
+    position: fixed;
+    left: 28px;
+    bottom: 32px;
+    width: 130px;
+    height: 130px;
+    border-radius: 50%;
+    background: rgba(255,255,255,0.08);
+    border: 2px solid rgba(255,255,255,0.18);
+    display: none;
+    z-index: 5;
+    touch-action: none;
+  }
+  #joystick.show { display: block; }
+  #stick {
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    width: 56px;
+    height: 56px;
+    margin-left: -28px;
+    margin-top: -28px;
+    border-radius: 50%;
+    background: rgba(255,255,255,0.35);
+    border: 2px solid rgba(255,255,255,0.4);
+    pointer-events: none;
+  }
+  #actionBtn {
+    position: fixed;
+    right: 28px;
+    bottom: 56px;
+    width: 84px;
+    height: 84px;
+    border-radius: 50%;
+    background: rgba(255, 213, 122, 0.18);
+    border: 2px solid rgba(255, 213, 122, 0.5);
+    color: #ffd57a;
+    font-size: 18px;
+    font-weight: bold;
+    display: none;
+    z-index: 5;
+    touch-action: none;
+    font-family: inherit;
+  }
+  #actionBtn.show { display: flex; align-items: center; justify-content: center; }
+  #actionBtn:active { background: rgba(255, 213, 122, 0.35); }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<div id="hint">Explore the island. Find what you can.</div>
+<div id="dialog"></div>
+<div id="joystick"><div id="stick"></div></div>
+<button id="actionBtn">A</button>
+<script>
+(() => {
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  const dialogEl = document.getElementById('dialog');
+  const hintEl = document.getElementById('hint');
+  const joystickEl = document.getElementById('joystick');
+  const stickEl = document.getElementById('stick');
+  const actionBtn = document.getElementById('actionBtn');
+
+  // ---------- Config ----------
+  const TILE = 32;
+  const MAP_W = 60;
+  const MAP_H = 60;
+  const WORLD_W = MAP_W * TILE;
+  const WORLD_H = MAP_H * TILE;
+
+  const T = { DEEP: 0, WATER: 1, SAND: 2, GRASS: 3, FOREST: 4, ROCK: 5 };
+  const ELEV = {
+    [T.DEEP]: 0, [T.WATER]: 1, [T.SAND]: 2,
+    [T.GRASS]: 3, [T.FOREST]: 3, [T.ROCK]: 4
+  };
+  const LAYER_COLORS = ['#0c3556', '#1c6a9c', '#e8d39a', '#5fa84a', '#7a7368'];
+  const SOLID = new Set([T.DEEP, T.WATER, T.ROCK]);
+
+  // ---------- Seeded RNG + noise ----------
+  function mulberry32(seed) {
+    return function() {
+      seed |= 0; seed = seed + 0x6D2B79F5 | 0;
+      let t = Math.imul(seed ^ seed >>> 15, 1 | seed);
+      t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+      return ((t ^ t >>> 14) >>> 0) / 4294967296;
+    };
+  }
+  const rng = mulberry32(20260415);
+
+  const noiseGrid = [];
+  for (let y = 0; y < MAP_H + 2; y++) {
+    noiseGrid[y] = [];
+    for (let x = 0; x < MAP_W + 2; x++) noiseGrid[y][x] = rng();
+  }
+  function smoothNoise(x, y) {
+    const xi = Math.floor(x), yi = Math.floor(y);
+    const xf = x - xi, yf = y - yi;
+    const get = (i, j) => {
+      i = Math.max(0, Math.min(MAP_W + 1, i));
+      j = Math.max(0, Math.min(MAP_H + 1, j));
+      return noiseGrid[j][i];
+    };
+    const a = get(xi, yi), b = get(xi+1, yi), c = get(xi, yi+1), d = get(xi+1, yi+1);
+    const sx = xf * xf * (3 - 2 * xf);
+    const sy = yf * yf * (3 - 2 * yf);
+    return a*(1-sx)*(1-sy) + b*sx*(1-sy) + c*(1-sx)*sy + d*sx*sy;
+  }
+  function fbm(x, y) {
+    let v = 0, amp = 1, freq = 1, total = 0;
+    for (let i = 0; i < 4; i++) {
+      v += smoothNoise(x*freq, y*freq) * amp;
+      total += amp;
+      amp *= 0.5;
+      freq *= 2;
+    }
+    return v / total;
+  }
+
+  // ---------- World generation ----------
+  const map = [];
+  const cx = MAP_W / 2, cy = MAP_H / 2;
+  const maxR = Math.min(MAP_W, MAP_H) / 2 - 2;
+  for (let y = 0; y < MAP_H; y++) {
+    map[y] = [];
+    for (let x = 0; x < MAP_W; x++) {
+      const dx = x - cx, dy = y - cy;
+      const dist = Math.sqrt(dx*dx + dy*dy);
+      const noise = fbm(x * 0.18, y * 0.18);
+      const elevation = (1 - dist / maxR) + (noise - 0.5) * 0.55;
+      let t;
+      if (elevation < 0.0)        t = T.DEEP;
+      else if (elevation < 0.10)  t = T.WATER;
+      else if (elevation < 0.20)  t = T.SAND;
+      else if (elevation < 0.70)  t = T.GRASS;
+      else if (elevation < 0.84)  t = T.FOREST;
+      else                        t = T.ROCK;
+      map[y][x] = t;
+    }
+  }
+  // light scattered forest patches across the grass (decorative, not walls)
+  for (let y = 0; y < MAP_H; y++) {
+    for (let x = 0; x < MAP_W; x++) {
+      if (map[y][x] === T.GRASS) {
+        const n = fbm(x * 0.4 + 100, y * 0.4 + 100);
+        if (n > 0.80) map[y][x] = T.FOREST;
+      }
+    }
+  }
+
+  function elevAt(x, y) {
+    if (x < 0 || y < 0 || x >= MAP_W || y >= MAP_H) return -1;
+    return ELEV[map[y][x]];
+  }
+
+  // ---------- POIs ----------
+  function findTile(x, y, type, maxR = 12) {
+    for (let r = 0; r < maxR; r++) {
+      for (let dy = -r; dy <= r; dy++) {
+        for (let dx = -r; dx <= r; dx++) {
+          if (Math.abs(dx) !== r && Math.abs(dy) !== r) continue;
+          const nx = x + dx, ny = y + dy;
+          if (nx < 0 || ny < 0 || nx >= MAP_W || ny >= MAP_H) continue;
+          if (map[ny][nx] === type) return { x: nx, y: ny };
+        }
+      }
+    }
+    return null;
+  }
+  function findGrassNear(x, y) { return findTile(x, y, T.GRASS, 20); }
+
+  // Find a ROCK tile at the EDGE of the mountain (has at least one walkable neighbour).
+  // Searches outward from (startX,startY) so we get the south-facing edge (closest to player start).
+  function findEdgeRock(startX, startY, maxR) {
+    for (let r = 1; r <= maxR; r++) {
+      for (let dy = -r; dy <= r; dy++) {
+        for (let dx = -r; dx <= r; dx++) {
+          if (Math.abs(dx) !== r && Math.abs(dy) !== r) continue;
+          const nx = startX + dx, ny = startY + dy;
+          if (nx < 0 || ny < 0 || nx >= MAP_W || ny >= MAP_H) continue;
+          if (map[ny][nx] !== T.ROCK) continue;
+          // Check if any of the 4 cardinal neighbours is walkable
+          for (const [ox, oy] of [[1,0],[-1,0],[0,1],[0,-1]]) {
+            const ax = nx+ox, ay = ny+oy;
+            if (ax<0||ay<0||ax>=MAP_W||ay>=MAP_H) continue;
+            if (!SOLID.has(map[ay][ax])) return { rock:{x:nx,y:ny}, anchor:{x:ax,y:ay} };
+          }
+        }
+      }
+    }
+    return null;
+  }
+
+  // ---------- Quest state ----------
+  const inventory = new Set(); // 'lure' | 'fishkey' | 'coin'
+  let questStep = 0;
+  // 0=start 1=know about lure 2=unused 3=have key 4=have coin 5=complete
+  let notification = null;
+  let notifTimer = 0;
+  let shrineActivated = false;
+  let shrineFlash = 0;
+  function showNotif(text) { notification = text; notifTimer = 3.5; }
+
+  // ---------- Ending sequence state ----------
+  // phase: null | 'rumble' | 'zoomout' | 'sink' | 'deep' | 'credits'
+  let endPhase = null;
+  let endTimer = 0;
+  let endZoom = 1.0;        // camera zoom (1=normal, lower=zoomed out)
+  let floodLevel = 0.0;     // 0..1 — fraction of tile types that are submerged
+  let endFade = 0.0;        // 0..1 black overlay
+  let rumbleX = 0, rumbleY = 0;  // screen-shake offsets
+  let creditsAlpha = 0.0;
+
+  function startEnding() {
+    window.__startEnding = startEnding; // dev hook — harmless
+    endPhase = 'rumble';
+    endTimer = 0;
+    // hide dialog and controls
+    dialogEl.style.display = 'none';
+    joystickEl.classList.remove('show');
+    document.getElementById('actionBtn').style.display = 'none';
+    // start deep rumble audio
+    if (audioCtx) startRumble();
+  }
+
+  function startRumble() {
+    try {
+      const buf = audioCtx.createBuffer(1, audioCtx.sampleRate * 8, audioCtx.sampleRate);
+      const d = buf.getChannelData(0);
+      let b = 0;
+      for (let i = 0; i < d.length; i++) { b = b * 0.99 + (Math.random()*2-1)*0.01; d[i] = b * 3; }
+      const src = audioCtx.createBufferSource();
+      src.buffer = buf;
+      const lp = audioCtx.createBiquadFilter();
+      lp.type = 'lowpass'; lp.frequency.value = 120;
+      const gain = audioCtx.createGain();
+      gain.gain.setValueAtTime(0, audioCtx.currentTime);
+      gain.gain.linearRampToValueAtTime(0.6, audioCtx.currentTime + 1.5);
+      gain.gain.linearRampToValueAtTime(0.0, audioCtx.currentTime + 7.5);
+      src.connect(lp); lp.connect(gain); gain.connect(audioCtx.destination);
+      src.start();
+    } catch(e) {}
+  }
+
+  const pois = [];
+
+  // --- Fisherman ---
+  let fish = findTile(Math.floor(cx) + 2, MAP_H - 4, T.SAND, 18);
+  if (fish) pois.push({
+    x: fish.x, y: fish.y, kind: 'fisherman', name: 'Old Fisherman',
+    get lines() {
+      if (questStep >= 3) return [
+        "Ha! I knew you'd find it.",
+        "I haven't caught a thing since I lost that lure, mind you.",
+        "Some things can't be got back."
+      ];
+      if (questStep >= 1 && inventory.has('lure')) return [
+        "That's my lucky lure! Thirty years I've had it.",
+        "Here — take this old key. It was tied to the lure's string.",
+        "There's a chest buried in the western grass. I found it years ago but couldn't open it.",
+        "Maybe it was waiting for someone else."
+      ];
+      if (questStep >= 1) return [
+        "Still no luck finding my lure?",
+        "I dropped it somewhere near the cave entrance. Little glinting thing.",
+        "Hard to miss if you're looking."
+      ];
+      return [
+        "The sea is restless today. Can you feel it?",
+        "I've fished this shore for forty years, but I lost my lucky lure.",
+        "I think the tide carried it west along the beach. Haven't been able to find it.",
+        "If you spot it, bring it back."
+      ];
+    },
+    onComplete() {
+      if (questStep === 0) { questStep = 1; }
+      else if (questStep >= 1 && inventory.has('lure')) {
+        inventory.delete('lure');
+        inventory.add('fishkey');
+        questStep = 3;
+        showNotif('Got: Fish-Shaped Key');
+      }
+    }
+  });
+
+  // --- Lure (west beach, far from fisherman) ---
+  let lureTile = findTile(8, Math.floor(cy), T.SAND, 20);
+  if (!lureTile) lureTile = findTile(8, Math.floor(cy), T.GRASS, 20);
+  if (lureTile) pois.push({
+    x: lureTile.x, y: lureTile.y, kind: 'lure', name: 'Something Glinting',
+    collected: false,
+    get lines() {
+      if (this.collected) return ["Just sand."];
+      return [
+        "A small fishing lure, half-buried in the sand.",
+        "Old but well-made.",
+        "You pick it up."
+      ];
+    },
+    onComplete() {
+      if (!this.collected) {
+        this.collected = true;
+        inventory.add('lure');
+        if (questStep === 0) questStep = 1;
+        showNotif('Found: Lucky Fishing Lure');
+      }
+    }
+  });
+
+  // --- Shrine ---
+  let shrineSpot = findGrassNear(Math.floor(cx + 11), Math.floor(cy - 11));
+  if (!shrineSpot) shrineSpot = findTile(Math.floor(cx + 11), Math.floor(cy - 11), T.FOREST, 15);
+  if (shrineSpot) {
+    map[shrineSpot.y][shrineSpot.x] = T.GRASS;
+    for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+      const nx = shrineSpot.x + dx, ny = shrineSpot.y + dy;
+      if (nx >= 0 && ny >= 0 && nx < MAP_W && ny < MAP_H && map[ny][nx] === T.FOREST) {
+        if (Math.random() < 0.6) map[ny][nx] = T.GRASS;
+      }
+    }
+    pois.push({
+      x: shrineSpot.x, y: shrineSpot.y, kind: 'shrine', name: 'Old Shrine',
+      get lines() {
+        if (shrineActivated) return [
+          "The shrine glows with a deep warmth.",
+          "You hear a low hum, like the island itself is breathing.",
+          "Far to the west, the cave mouth looks... different now."
+        ];
+        if (inventory.has('coin')) return [
+          "You place the ancient coin at the shrine's base.",
+          "The air grows suddenly warm. The stone begins to glow.",
+          "A deep hum rises from the ground beneath your feet.",
+          "Something has changed on this island."
+        ];
+        if (questStep >= 1) return [
+          "A weathered stone shrine, half-swallowed by moss.",
+          "Offerings rest at its base: shells, a bone.",
+          "One hollow is empty — shaped like a coin.",
+          "You have nothing to offer yet."
+        ];
+        return [
+          "A weathered stone shrine, half-swallowed by moss.",
+          "You feel something is waiting here.",
+          "(Come back when you know more about this place.)"
+        ];
+      },
+      onComplete() {
+        if (inventory.has('coin')) {
+          inventory.delete('coin');
+          questStep = 5;
+          shrineActivated = true;
+          shrineFlash = 1;
+          showNotif('The island stirs...');
+        }
+      }
+    });
+  }
+
+  // --- Cave + Lure ---
+  // Find a rock tile at the EDGE of the mountain (already has a walkable neighbour).
+  // Search from just south of the peak so the entrance faces the player's starting area.
+  const caveResult = findEdgeRock(Math.floor(cx), Math.floor(cy) + 4, 28);
+  if (caveResult) {
+    const { rock: cave, anchor: caveAnchor } = caveResult;
+    // Clear forest around the entrance so the path is open
+    for (let dy = -4; dy <= 4; dy++) {
+      for (let dx = -4; dx <= 4; dx++) {
+        const nx = caveAnchor.x + dx, ny = caveAnchor.y + dy;
+        if (nx>=0&&ny>=0&&nx<MAP_W&&ny<MAP_H && map[ny][nx] === T.FOREST)
+          map[ny][nx] = T.GRASS;
+      }
+    }
+    // Also convert any ROCK tiles near the anchor that block the path
+    for (const [dx,dy] of [[1,1],[0,1],[-1,1],[1,2],[0,2],[-1,2]]) {
+      const nx = caveAnchor.x + dx, ny = caveAnchor.y + dy;
+      if (nx>=0&&ny>=0&&nx<MAP_W&&ny<MAP_H && map[ny][nx] === T.ROCK)
+        map[ny][nx] = T.GRASS;
+    }
+    {
+      pois.push({
+        x: caveAnchor.x, y: caveAnchor.y, kind: 'cave', name: 'Cave Mouth',
+        get lines() {
+          if (shrineActivated) return [
+            "The cave mouth looks wider now. Almost inviting.",
+            "You squeeze inside. The darkness swallows you whole.",
+            "Then — light. Faint and golden, deep within the rock.",
+            "Whatever has waited at the end of this cave...",
+            "...it has waited a very long time. (To be continued.)"
+          ];
+          return [
+            "A narrow opening yawns in the cliff face.",
+            "Cold air drifts out, smelling of wet stone.",
+            "Something glints far back in the dark.",
+            "(The passage is too tight. You'd need to find another way.)"
+          ];
+        },
+        onComplete() {
+          if (shrineActivated) startEnding();
+        }
+      });
+      // (lure is placed independently below)
+    }
+  }
+
+  // --- Chest ---
+  let chest = findGrassNear(Math.floor(cx - 9), Math.floor(cy + 9));
+  if (chest) pois.push({
+    x: chest.x, y: chest.y, kind: 'chest', name: 'Old Chest',
+    opened: false,
+    get lines() {
+      if (this.opened) return [
+        "The chest sits open and empty.",
+        "Whatever was inside is gone now."
+      ];
+      if (inventory.has('fishkey')) return [
+        "You insert the fish-shaped key. The lock clicks open.",
+        "The lid creaks. Inside: a single gold coin, very old.",
+        "One face shows a portrait. The other shows a flame.",
+        "You take the coin."
+      ];
+      return [
+        "A wooden chest, half-buried in tall grass.",
+        "The lock is shaped like a fish.",
+        "(You don't have the right key.)"
+      ];
+    },
+    onComplete() {
+      if (!this.opened && inventory.has('fishkey')) {
+        inventory.delete('fishkey');
+        inventory.add('coin');
+        this.opened = true;
+        questStep = 4;
+        showNotif('Found: Ancient Gold Coin');
+      }
+    }
+  });
+
+  // --- Sign ---
+  let sign = findGrassNear(Math.floor(cx), Math.floor(cy + 2));
+  if (sign) pois.push({
+    x: sign.x, y: sign.y, kind: 'sign', name: 'Weathered Sign',
+    lines: [
+      "Carved into the wood: 'Welcome, wanderer.'",
+      "Below, in a different hand: 'Do not trust the shrine.'"
+    ],
+    onComplete() {}
+  });
+
+  // ---------- Decorations ----------
+  // Small clutter scattered across the world: shells, flowers, mushrooms, pebbles, driftwood
+  function dhash(x, y, salt) {
+    let h = ((x * 73856093) ^ (y * 19349663) ^ (salt * 83492791)) >>> 0;
+    h = ((h ^ (h >>> 13)) * 1274126177) >>> 0;
+    return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
+  }
+  const decorations = [];
+  for (let y = 0; y < MAP_H; y++) {
+    for (let x = 0; x < MAP_W; x++) {
+      const t = map[y][x];
+      // Skip near POI tiles to avoid clutter on top
+      let nearPOI = false;
+      for (const p of pois) {
+        if (Math.abs(p.x - x) <= 1 && Math.abs(p.y - y) <= 1) { nearPOI = true; break; }
+      }
+      if (nearPOI) continue;
+      if (t === T.SAND) {
+        if (dhash(x, y, 1) < 0.10) decorations.push({ x, y, kind: 'shell', s: dhash(x, y, 2) });
+        else if (dhash(x, y, 3) < 0.04) decorations.push({ x, y, kind: 'driftwood', s: dhash(x, y, 4) });
+      } else if (t === T.GRASS) {
+        if (dhash(x, y, 5) < 0.14) decorations.push({ x, y, kind: 'flower', s: dhash(x, y, 6) });
+        else if (dhash(x, y, 7) < 0.04) decorations.push({ x, y, kind: 'mushroom', s: dhash(x, y, 8) });
+      } else if (t === T.FOREST) {
+        if (dhash(x, y, 9) < 0.18) decorations.push({ x, y, kind: 'mushroom', s: dhash(x, y, 10) });
+      } else if (t === T.ROCK) {
+        if (dhash(x, y, 11) < 0.20) decorations.push({ x, y, kind: 'pebbles', s: dhash(x, y, 12) });
+      }
+    }
+  }
+
+  // ---------- Player ----------
+  let start = findGrassNear(Math.floor(cx), Math.floor(cy)) || { x: Math.floor(cx), y: Math.floor(cy) };
+  const player = {
+    x: start.x * TILE + TILE/2,
+    y: start.y * TILE + TILE/2,
+    r: 10,
+    speed: 140,
+    dir: -Math.PI/2,
+    moving: false,
+  };
+
+  // ---------- Audio ----------
+  let audio = null;
+  let audioReady = false;
+  let masterGain = null;
+  let noiseBuffer = null;
+
+  function ensureAudio() {
+    if (!audio) {
+      try {
+        audio = new (window.AudioContext || window.webkitAudioContext)();
+        masterGain = audio.createGain();
+        masterGain.gain.value = 0.55;
+        masterGain.connect(audio.destination);
+
+        // Brown noise buffer (4s loop)
+        const len = audio.sampleRate * 4;
+        noiseBuffer = audio.createBuffer(1, len, audio.sampleRate);
+        const data = noiseBuffer.getChannelData(0);
+        let lastOut = 0;
+        for (let i = 0; i < len; i++) {
+          const white = Math.random() * 2 - 1;
+          lastOut = (lastOut + 0.02 * white) / 1.02;
+          data[i] = lastOut * 3.5;
+        }
+
+        // Wind ambient
+        const wind = audio.createBufferSource();
+        wind.buffer = noiseBuffer;
+        wind.loop = true;
+        const windFilter = audio.createBiquadFilter();
+        windFilter.type = 'lowpass';
+        windFilter.frequency.value = 700;
+        const windGain = audio.createGain();
+        windGain.gain.value = 0.06;
+        const windLFO = audio.createOscillator();
+        windLFO.frequency.value = 0.13;
+        const windLFOGain = audio.createGain();
+        windLFOGain.gain.value = 0.04;
+        windLFO.connect(windLFOGain);
+        windLFOGain.connect(windGain.gain);
+        wind.connect(windFilter);
+        windFilter.connect(windGain);
+        windGain.connect(masterGain);
+        wind.start();
+        windLFO.start();
+
+        // Waves ambient (much lower frequency, slower modulation)
+        const waves = audio.createBufferSource();
+        waves.buffer = noiseBuffer;
+        waves.loop = true;
+        const wavesFilter = audio.createBiquadFilter();
+        wavesFilter.type = 'lowpass';
+        wavesFilter.frequency.value = 220;
+        const wavesGain = audio.createGain();
+        wavesGain.gain.value = 0.07;
+        const wavesLFO = audio.createOscillator();
+        wavesLFO.frequency.value = 0.08;
+        const wavesLFOGain = audio.createGain();
+        wavesLFOGain.gain.value = 0.05;
+        wavesLFO.connect(wavesLFOGain);
+        wavesLFOGain.connect(wavesGain.gain);
+        waves.connect(wavesFilter);
+        wavesFilter.connect(wavesGain);
+        wavesGain.connect(masterGain);
+        waves.start();
+        wavesLFO.start();
+
+        audioReady = true;
+      } catch (e) { audio = null; }
+    }
+    if (audio && audio.state === 'suspended') audio.resume();
+  }
+
+  function playFootstep(kind) {
+    if (!audioReady) return;
+    const src = audio.createBufferSource();
+    src.buffer = noiseBuffer;
+    const offset = Math.random() * (noiseBuffer.duration - 0.2);
+    const filter = audio.createBiquadFilter();
+    filter.type = 'bandpass';
+    filter.frequency.value = kind === 'sand' ? 240 : 480;
+    filter.Q.value = 0.9;
+    const gain = audio.createGain();
+    const now = audio.currentTime;
+    gain.gain.setValueAtTime(0, now);
+    gain.gain.linearRampToValueAtTime(0.13, now + 0.005);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.11);
+    src.connect(filter); filter.connect(gain); gain.connect(masterGain);
+    src.start(now, offset);
+    src.stop(now + 0.15);
+  }
+
+  function playInteract() {
+    if (!audioReady) return;
+    const osc = audio.createOscillator();
+    osc.type = 'sine';
+    osc.frequency.value = 660;
+    const gain = audio.createGain();
+    const now = audio.currentTime;
+    gain.gain.setValueAtTime(0, now);
+    gain.gain.linearRampToValueAtTime(0.10, now + 0.01);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.4);
+    osc.connect(gain); gain.connect(masterGain);
+    osc.start(now); osc.stop(now + 0.45);
+  }
+
+  // ---------- Particles ----------
+  const particles = [];
+  function spawnDust(x, y, r, g, b) {
+    for (let i = 0; i < 2; i++) {
+      particles.push({
+        x, y,
+        vx: (Math.random() - 0.5) * 30,
+        vy: -Math.random() * 18 - 4,
+        life: 0.55, maxLife: 0.55,
+        r, g, b,
+        size: 2 + Math.random() * 1.6,
+      });
+    }
+  }
+  function updateParticles(dt) {
+    for (let i = particles.length - 1; i >= 0; i--) {
+      const p = particles[i];
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
+      p.vy += 35 * dt;
+      p.life -= dt;
+      if (p.life <= 0) particles.splice(i, 1);
+    }
+  }
+  function drawParticles(camX, camY) {
+    for (const p of particles) {
+      const a = (p.life / p.maxLife) * 0.7;
+      ctx.fillStyle = `rgba(${p.r},${p.g},${p.b},${a.toFixed(3)})`;
+      ctx.fillRect(
+        Math.floor(p.x - camX - p.size / 2),
+        Math.floor(p.y - camY - p.size / 2),
+        p.size, p.size
+      );
+    }
+  }
+
+  // ---------- Input ----------
+  const keys = {};
+  window.addEventListener('keydown', e => {
+    ensureAudio();
+    keys[e.key.toLowerCase()] = true;
+    if (e.key === ' ' || e.key.toLowerCase() === 'e' || e.key === 'Enter') {
+      e.preventDefault();
+      tryInteract();
+    }
+  });
+  window.addEventListener('keyup', e => { keys[e.key.toLowerCase()] = false; });
+
+  const isTouch = ('ontouchstart' in window) || navigator.maxTouchPoints > 0;
+  if (isTouch) {
+    joystickEl.classList.add('show');
+    actionBtn.classList.add('show');
+  }
+
+  // Joystick
+  let joyActive = false, joyId = null;
+  let joyCenter = { x: 0, y: 0 };
+  const joyMaxDist = 50;
+  const joyVec = { x: 0, y: 0 };
+  function updateJoyCenter() {
+    const r = joystickEl.getBoundingClientRect();
+    joyCenter.x = r.left + r.width / 2;
+    joyCenter.y = r.top + r.height / 2;
+  }
+  function setStickVec(dx, dy) {
+    const len = Math.hypot(dx, dy);
+    if (len > joyMaxDist) { dx = dx / len * joyMaxDist; dy = dy / len * joyMaxDist; }
+    stickEl.style.transform = `translate(${dx}px, ${dy}px)`;
+    joyVec.x = dx / joyMaxDist;
+    joyVec.y = dy / joyMaxDist;
+  }
+  function resetStick() {
+    stickEl.style.transform = '';
+    joyVec.x = 0; joyVec.y = 0;
+    joyActive = false; joyId = null;
+  }
+  joystickEl.addEventListener('pointerdown', e => {
+    e.preventDefault(); ensureAudio();
+    joystickEl.setPointerCapture(e.pointerId);
+    updateJoyCenter();
+    joyActive = true; joyId = e.pointerId;
+    setStickVec(e.clientX - joyCenter.x, e.clientY - joyCenter.y);
+  });
+  joystickEl.addEventListener('pointermove', e => {
+    if (!joyActive || e.pointerId !== joyId) return;
+    setStickVec(e.clientX - joyCenter.x, e.clientY - joyCenter.y);
+  });
+  joystickEl.addEventListener('pointerup', e => { if (e.pointerId === joyId) resetStick(); });
+  joystickEl.addEventListener('pointercancel', e => { if (e.pointerId === joyId) resetStick(); });
+
+  actionBtn.addEventListener('pointerdown', e => {
+    e.preventDefault(); ensureAudio();
+    tryInteract();
+  });
+  dialogEl.addEventListener('pointerdown', e => {
+    e.preventDefault(); ensureAudio();
+    advanceDialog();
+  });
+  // First click anywhere also unlocks audio
+  window.addEventListener('pointerdown', () => ensureAudio(), { once: false });
+
+  // ---------- Dialog ----------
+  let currentDialog = null;
+  let dialogIdx = 0;
+  let interactCooldown = 0;
+  function showDialog(poi) {
+    currentDialog = poi;
+    dialogIdx = 0;
+    playInteract();
+    renderDialog();
+  }
+  function renderDialog() {
+    if (!currentDialog) { dialogEl.classList.remove('show'); return; }
+    const line = currentDialog.lines[dialogIdx];
+    dialogEl.innerHTML = `<span class="name">${currentDialog.name}</span>${line}<span class="hint">tap to continue</span>`;
+    dialogEl.classList.add('show');
+  }
+  function advanceDialog() {
+    if (!currentDialog) return;
+    dialogIdx++;
+    if (dialogIdx >= currentDialog.lines.length) {
+      const completed = currentDialog;
+      currentDialog = null;
+      dialogEl.classList.remove('show');
+      interactCooldown = 0.8;
+      completed.onComplete?.();
+    } else {
+      playInteract();
+      renderDialog();
+    }
+  }
+  function nearestPOI() {
+    let best = null, bestD = TILE * 1.9;
+    for (const p of pois) {
+      if (p.kind === 'lure' && p.collected) continue;
+      const px = p.x * TILE + TILE/2;
+      const py = p.y * TILE + TILE/2;
+      const d = Math.hypot(player.x - px, player.y - py);
+      if (d < bestD) { bestD = d; best = p; }
+    }
+    return best;
+  }
+  function tryInteract() {
+    if (currentDialog) { advanceDialog(); return; }
+    if (interactCooldown > 0) return;
+    const p = nearestPOI();
+    if (p) showDialog(p);
+  }
+
+  // ---------- Camera & resize ----------
+  let viewW = 0, viewH = 0, dpr = 1;
+  function resize() {
+    dpr = Math.min(window.devicePixelRatio || 1, 2);
+    viewW = window.innerWidth;
+    viewH = window.innerHeight;
+    canvas.width = Math.floor(viewW * dpr);
+    canvas.height = Math.floor(viewH * dpr);
+    canvas.style.width = viewW + 'px';
+    canvas.style.height = viewH + 'px';
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.imageSmoothingEnabled = false;
+    updateJoyCenter();
+  }
+  window.addEventListener('resize', resize);
+  window.addEventListener('orientationchange', () => setTimeout(resize, 150));
+  resize();
+
+  hintEl.classList.add('show');
+  setTimeout(() => hintEl.classList.remove('show'), 4500);
+
+  // ---------- Movement & collision ----------
+  let footDist = 0;
+  function isSolidAt(px, py) {
+    const tx = Math.floor(px / TILE);
+    const ty = Math.floor(py / TILE);
+    if (tx < 0 || ty < 0 || tx >= MAP_W || ty >= MAP_H) return true;
+    return SOLID.has(map[ty][tx]);
+  }
+  function tryMove(dx, dy) {
+    const r = player.r - 2;
+    let moved = 0;
+    if (dx !== 0) {
+      const nx = player.x + dx;
+      const sx = nx + Math.sign(dx) * r;
+      if (!isSolidAt(sx, player.y - r) && !isSolidAt(sx, player.y + r) && !isSolidAt(sx, player.y)) {
+        player.x = nx; moved += Math.abs(dx);
+      }
+    }
+    if (dy !== 0) {
+      const ny = player.y + dy;
+      const sy = ny + Math.sign(dy) * r;
+      if (!isSolidAt(player.x - r, sy) && !isSolidAt(player.x + r, sy) && !isSolidAt(player.x, sy)) {
+        player.y = ny; moved += Math.abs(dy);
+      }
+    }
+    if (moved > 0) {
+      footDist += moved;
+      if (footDist > 18) {
+        footDist = 0;
+        const tx = Math.floor(player.x / TILE);
+        const ty = Math.floor(player.y / TILE);
+        const t = map[ty] && map[ty][tx];
+        if (t === T.SAND) {
+          spawnDust(player.x, player.y + 9, 220, 195, 140);
+          playFootstep('sand');
+        } else if (t === T.GRASS || t === T.FOREST) {
+          spawnDust(player.x, player.y + 9, 90, 140, 70);
+          playFootstep('grass');
+        }
+      }
+    }
+  }
+
+  // ---------- Pre-rendered ground canvas ----------
+  const groundCanvas = document.createElement('canvas');
+  groundCanvas.width = WORLD_W;
+  groundCanvas.height = WORLD_H;
+  const gctx = groundCanvas.getContext('2d');
+
+  function drawBlobOn(c, L, x, y, sx, sy) {
+    const r = 7;
+    const inN = elevAt(x, y - 1) >= L;
+    const inS = elevAt(x, y + 1) >= L;
+    const inE = elevAt(x + 1, y) >= L;
+    const inW = elevAt(x - 1, y) >= L;
+    const tl = (!inN && !inW) ? r : 0;
+    const tr = (!inN && !inE) ? r : 0;
+    const br = (!inS && !inE) ? r : 0;
+    const bl = (!inS && !inW) ? r : 0;
+    c.beginPath();
+    c.moveTo(sx + tl, sy);
+    c.lineTo(sx + TILE - tr, sy);
+    if (tr) c.quadraticCurveTo(sx + TILE, sy, sx + TILE, sy + tr);
+    c.lineTo(sx + TILE, sy + TILE - br);
+    if (br) c.quadraticCurveTo(sx + TILE, sy + TILE, sx + TILE - br, sy + TILE);
+    c.lineTo(sx + bl, sy + TILE);
+    if (bl) c.quadraticCurveTo(sx, sy + TILE, sx, sy + TILE - bl);
+    c.lineTo(sx, sy + tl);
+    if (tl) c.quadraticCurveTo(sx, sy, sx + tl, sy);
+    c.closePath();
+    c.fill();
+  }
+
+  function drawDecorationOn(c, d) {
+    const sx = d.x * TILE, sy = d.y * TILE;
+    const ox = Math.floor((d.s * 1000) % 16) - 8;
+    const oy = Math.floor((d.s * 7000) % 16) - 8;
+    const cx = sx + TILE/2 + ox;
+    const cy = sy + TILE/2 + oy;
+    if (d.kind === 'shell') {
+      c.fillStyle = '#fceec5';
+      c.fillRect(cx, cy, 3, 2);
+      c.fillStyle = '#dfb98a';
+      c.fillRect(cx, cy + 2, 3, 1);
+    } else if (d.kind === 'driftwood') {
+      c.fillStyle = '#5a3a1a';
+      c.fillRect(cx - 4, cy, 9, 2);
+      c.fillStyle = '#3a2010';
+      c.fillRect(cx - 4, cy + 2, 9, 1);
+    } else if (d.kind === 'flower') {
+      const colors = ['#ff4a7a', '#ffd14a', '#ffffff', '#9ad8ff', '#d65aff', '#ff8a3a'];
+      const col = colors[Math.floor(d.s * colors.length) % colors.length];
+      c.fillStyle = '#356b22';
+      c.fillRect(cx, cy + 1, 1, 3);
+      c.fillStyle = col;
+      c.fillRect(cx - 1, cy - 1, 3, 2);
+      c.fillRect(cx, cy, 1, 1);
+    } else if (d.kind === 'mushroom') {
+      c.fillStyle = '#fceec5';
+      c.fillRect(cx, cy + 1, 1, 2);
+      c.fillStyle = '#c8332a';
+      c.fillRect(cx - 1, cy - 1, 3, 2);
+      c.fillStyle = '#fff';
+      c.fillRect(cx - 1, cy - 1, 1, 1);
+      c.fillRect(cx + 1, cy, 1, 1);
+    } else if (d.kind === 'pebbles') {
+      c.fillStyle = '#5a544a';
+      c.fillRect(cx, cy, 2, 2);
+      c.fillRect(cx + 3, cy + 1, 2, 1);
+      c.fillStyle = '#9a9388';
+      c.fillRect(cx, cy, 1, 1);
+    }
+  }
+
+  function preRenderGround() {
+    // Layer 0: deep base everywhere
+    gctx.fillStyle = LAYER_COLORS[0];
+    gctx.fillRect(0, 0, WORLD_W, WORLD_H);
+    // Layers 1..4: blobs of higher elevation
+    for (let L = 1; L <= 4; L++) {
+      gctx.fillStyle = LAYER_COLORS[L];
+      for (let y = 0; y < MAP_H; y++) {
+        for (let x = 0; x < MAP_W; x++) {
+          if (elevAt(x, y) >= L) {
+            drawBlobOn(gctx, L, x, y, x * TILE, y * TILE);
+          }
+        }
+      }
+    }
+    // Texture sprinkle on grass/sand
+    for (let y = 0; y < MAP_H; y++) {
+      for (let x = 0; x < MAP_W; x++) {
+        const t = map[y][x];
+        const sx = x * TILE, sy = y * TILE;
+        const h = ((x*73856093) ^ (y*19349663)) >>> 0;
+        if (t === T.GRASS || t === T.FOREST) {
+          if (h % 5 === 0) { gctx.fillStyle = '#4a8838'; gctx.fillRect(sx + (h%TILE), sy + ((h>>5)%TILE), 2, 2); }
+          if (h % 13 === 0) { gctx.fillStyle = '#7ec25a'; gctx.fillRect(sx + ((h>>3)%TILE), sy + ((h>>9)%TILE), 2, 2); }
+        } else if (t === T.SAND) {
+          if (h % 9 === 0) { gctx.fillStyle = '#c9b078'; gctx.fillRect(sx + (h%TILE), sy + ((h>>5)%TILE), 2, 2); }
+          if (h % 23 === 0) { gctx.fillStyle = '#fff5d8'; gctx.fillRect(sx + ((h>>3)%TILE), sy + ((h>>9)%TILE), 1, 1); }
+        }
+      }
+    }
+    // Decorations (excluding trees and rock piles which are drawn dynamically)
+    for (const d of decorations) drawDecorationOn(gctx, d);
+  }
+  preRenderGround();
+
+  // ---------- Render ----------
+  let time = 0;
+  const drawables = [];
+
+  function drawTree(tx, ty, camX, camY) {
+    const sx = Math.floor(tx * TILE - camX);
+    const sy = Math.floor(ty * TILE - camY);
+    const phase = ((tx * 7) + (ty * 13)) * 0.31;
+    const sway = Math.sin(time * 1.3 + phase) * 1.6;
+    // shadow
+    ctx.fillStyle = 'rgba(0,0,0,0.28)';
+    ctx.beginPath();
+    ctx.ellipse(sx + TILE/2, sy + TILE - 3, 11, 4, 0, 0, Math.PI*2);
+    ctx.fill();
+    // trunk
+    ctx.fillStyle = '#3a2418';
+    ctx.fillRect(sx + TILE/2 - 2, sy + TILE - 12, 4, 9);
+    // leaves
+    ctx.fillStyle = '#1b3f17';
+    ctx.beginPath();
+    ctx.arc(sx + TILE/2 + sway, sy + TILE/2 - 2, TILE/2, 0, Math.PI*2);
+    ctx.fill();
+    ctx.fillStyle = '#2f6b22';
+    ctx.beginPath();
+    ctx.arc(sx + TILE/2 - 4 + sway, sy + TILE/2 - 5, TILE/2.5, 0, Math.PI*2);
+    ctx.fill();
+    ctx.fillStyle = '#4a8b32';
+    ctx.beginPath();
+    ctx.arc(sx + TILE/2 - 6 + sway, sy + TILE/2 - 8, TILE/4, 0, Math.PI*2);
+    ctx.fill();
+  }
+
+  function drawRockPile(tx, ty, camX, camY) {
+    const sx = Math.floor(tx * TILE - camX);
+    const sy = Math.floor(ty * TILE - camY);
+    ctx.fillStyle = 'rgba(0,0,0,0.25)';
+    ctx.beginPath();
+    ctx.ellipse(sx + TILE/2, sy + TILE - 4, 10, 3, 0, 0, Math.PI*2);
+    ctx.fill();
+    ctx.fillStyle = '#4a443a';
+    ctx.beginPath();
+    ctx.arc(sx + TILE/2, sy + TILE/2 + 2, TILE/2 - 2, 0, Math.PI*2);
+    ctx.fill();
+    ctx.fillStyle = '#9a9388';
+    ctx.beginPath();
+    ctx.arc(sx + TILE/2 - 5, sy + TILE/2 - 4, TILE/4, 0, Math.PI*2);
+    ctx.fill();
+    ctx.fillStyle = '#bcb5a8';
+    ctx.beginPath();
+    ctx.arc(sx + TILE/2 - 6, sy + TILE/2 - 6, 2, 0, Math.PI*2);
+    ctx.fill();
+  }
+
+  function drawPOI(p, camX, camY) {
+    const sx = Math.floor(p.x * TILE - camX);
+    const sy = Math.floor(p.y * TILE - camY);
+    const cx = sx + TILE/2, cy = sy + TILE/2;
+    if (p.kind === 'fisherman') {
+      // bob slightly
+      const b = Math.sin(time * 1.2) * 0.8;
+      ctx.fillStyle = 'rgba(0,0,0,0.3)';
+      ctx.beginPath(); ctx.ellipse(cx, cy + 9, 8, 3, 0, 0, Math.PI*2); ctx.fill();
+      ctx.fillStyle = '#3a4f7a';
+      ctx.fillRect(cx - 6, cy - 4 + b, 12, 12);
+      ctx.fillStyle = '#e8c39a';
+      ctx.beginPath(); ctx.arc(cx, cy - 8 + b, 5, 0, Math.PI*2); ctx.fill();
+      ctx.fillStyle = '#5a3a1a';
+      ctx.fillRect(cx - 8, cy - 11 + b, 16, 2);
+      ctx.fillRect(cx - 4, cy - 15 + b, 8, 4);
+      // fishing rod
+      ctx.strokeStyle = '#6a4a2a';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(cx + 6, cy - 2 + b);
+      ctx.lineTo(cx + 14, cy - 14 + b);
+      ctx.stroke();
+    } else if (p.kind === 'shrine') {
+      ctx.fillStyle = 'rgba(0,0,0,0.35)';
+      ctx.beginPath(); ctx.ellipse(cx, cy + 10, 13, 4, 0, 0, Math.PI*2); ctx.fill();
+      ctx.fillStyle = '#3a3a3a';
+      ctx.fillRect(cx - 8, cy - 4, 16, 12);
+      ctx.fillStyle = '#5a5a5a';
+      ctx.fillRect(cx - 11, cy - 8, 22, 4);
+      ctx.fillStyle = '#1a1a1a';
+      ctx.fillRect(cx - 3, cy - 2, 6, 7);
+      // tiny offering bowl
+      ctx.fillStyle = '#8a6a3a';
+      ctx.fillRect(cx - 9, cy + 6, 4, 2);
+      ctx.fillRect(cx + 5, cy + 6, 4, 2);
+    } else if (p.kind === 'cave') {
+      const flicker = (Math.sin(time * 3.7) + 1) * 0.5;
+      // Drop shadow
+      ctx.fillStyle = 'rgba(0,0,0,0.45)';
+      ctx.beginPath(); ctx.ellipse(cx, cy + 18, 20, 6, 0, 0, Math.PI*2); ctx.fill();
+      // Wide stone cliff face — very visible even small on screen
+      ctx.fillStyle = '#6b6260';
+      ctx.fillRect(cx - 22, cy - 20, 44, 38);
+      // Darker layered rocks for depth
+      ctx.fillStyle = '#4e4a48';
+      ctx.fillRect(cx - 22, cy - 20, 44, 6);
+      ctx.fillRect(cx - 22, cy + 6, 44, 12);
+      // Cave opening — tall dark arch
+      ctx.fillStyle = shrineActivated ? '#1a0800' : '#0a0806';
+      ctx.beginPath();
+      ctx.moveTo(cx - 12, cy + 16);
+      ctx.lineTo(cx - 12, cy - 6);
+      ctx.quadraticCurveTo(cx - 12, cy - 18, cx, cy - 18);
+      ctx.quadraticCurveTo(cx + 12, cy - 18, cx + 12, cy - 6);
+      ctx.lineTo(cx + 12, cy + 16);
+      ctx.closePath();
+      ctx.fill();
+      // Stone arch keystones
+      ctx.fillStyle = '#8a7e78';
+      ctx.fillRect(cx - 4, cy - 21, 8, 5);
+      // Left/right pillar highlights
+      ctx.fillStyle = '#7a7270';
+      ctx.fillRect(cx - 22, cy - 14, 8, 30);
+      ctx.fillRect(cx + 14, cy - 14, 8, 30);
+      // Ground ledge
+      ctx.fillStyle = '#3a3230';
+      ctx.fillRect(cx - 22, cy + 16, 44, 5);
+      if (shrineActivated) {
+        // Warm golden glow spilling from the opening
+        ctx.save();
+        ctx.globalCompositeOperation = 'lighter';
+        const cg = ctx.createRadialGradient(cx, cy, 0, cx, cy, 42 + flicker * 12);
+        cg.addColorStop(0, `rgba(255,200,80,${0.6 + flicker * 0.25})`);
+        cg.addColorStop(0.5, `rgba(255,150,20,${0.2 + flicker * 0.1})`);
+        cg.addColorStop(1, 'rgba(255,100,0,0)');
+        ctx.fillStyle = cg;
+        ctx.fillRect(cx - 54, cy - 54, 108, 108);
+        ctx.restore();
+        // Pulsing glow inside arch
+        ctx.fillStyle = `rgba(255,200,80,${0.4 + flicker * 0.4})`;
+        ctx.beginPath();
+        ctx.moveTo(cx - 10, cy + 14);
+        ctx.lineTo(cx - 10, cy - 4);
+        ctx.quadraticCurveTo(cx - 10, cy - 14, cx, cy - 14);
+        ctx.quadraticCurveTo(cx + 10, cy - 14, cx + 10, cy - 4);
+        ctx.lineTo(cx + 10, cy + 14);
+        ctx.closePath();
+        ctx.fill();
+      } else {
+        // Faint cool mist / gleam at the back of the dark cave
+        ctx.save();
+        ctx.globalAlpha = 0.25 + flicker * 0.25;
+        ctx.fillStyle = '#aaccff';
+        ctx.fillRect(cx - 2, cy - 10, 4, 6);
+        ctx.restore();
+        // Cold breath particles (just 3 dots to hint at life inside)
+        ctx.fillStyle = `rgba(180,210,255,${0.3 + flicker * 0.2})`;
+        ctx.beginPath(); ctx.arc(cx - 4, cy, 2, 0, Math.PI*2); ctx.fill();
+        ctx.beginPath(); ctx.arc(cx + 3, cy - 4, 1.5, 0, Math.PI*2); ctx.fill();
+        ctx.beginPath(); ctx.arc(cx, cy + 2, 1, 0, Math.PI*2); ctx.fill();
+      }
+    } else if (p.kind === 'chest') {
+      ctx.fillStyle = 'rgba(0,0,0,0.3)';
+      ctx.beginPath(); ctx.ellipse(cx, cy + 9, 10, 3, 0, 0, Math.PI*2); ctx.fill();
+      ctx.fillStyle = '#6b3f1a';
+      ctx.fillRect(cx - 9, cy - 3, 18, 11);
+      if (p.opened) {
+        // open lid tilted back
+        ctx.fillStyle = '#a8651a';
+        ctx.fillRect(cx - 9, cy - 10, 18, 4);
+        ctx.fillStyle = '#3a1a08';
+        ctx.fillRect(cx - 7, cy - 3, 14, 9); // dark inside
+      } else {
+        ctx.fillStyle = '#a8651a';
+        ctx.fillRect(cx - 9, cy - 6, 18, 4);
+        ctx.fillStyle = '#d4a008';
+        ctx.fillRect(cx - 1, cy - 1, 2, 4);
+      }
+    } else if (p.kind === 'lure') {
+      if (!p.collected) {
+        const pulse = (Math.sin(time * 2.5) + 1) * 0.5;
+        // big additive glow
+        ctx.save();
+        ctx.globalCompositeOperation = 'lighter';
+        const g = ctx.createRadialGradient(cx, cy, 0, cx, cy, 22 + pulse * 8);
+        g.addColorStop(0, `rgba(255,220,60,${0.5 + pulse * 0.3})`);
+        g.addColorStop(1, 'rgba(255,180,0,0)');
+        ctx.fillStyle = g;
+        ctx.fillRect(cx - 32, cy - 32, 64, 64);
+        ctx.restore();
+        // vertical beam of light shooting upward
+        ctx.save();
+        ctx.globalCompositeOperation = 'lighter';
+        const beam = ctx.createLinearGradient(cx, cy - 60, cx, cy);
+        beam.addColorStop(0, 'rgba(255,220,60,0)');
+        beam.addColorStop(1, `rgba(255,220,60,${0.3 + pulse * 0.25})`);
+        ctx.fillStyle = beam;
+        ctx.fillRect(cx - 3, cy - 60, 6, 60);
+        ctx.restore();
+        // star sparkles
+        ctx.fillStyle = '#fff';
+        for (let i = 0; i < 4; i++) {
+          const a = (i / 4) * Math.PI * 2 + time * 1.5;
+          const r = 8 + pulse * 4;
+          ctx.fillRect(cx + Math.cos(a)*r - 1, cy + Math.sin(a)*r - 1, 2, 2);
+        }
+        // item body
+        ctx.fillStyle = '#ffd700';
+        ctx.fillRect(cx - 4, cy - 3, 8, 5);
+        ctx.fillStyle = '#fff';
+        ctx.fillRect(cx - 2, cy - 2, 2, 2);
+      }
+    } else if (p.kind === 'sign') {
+      ctx.fillStyle = '#4a2f15';
+      ctx.fillRect(cx - 1, cy - 2, 2, 12);
+      ctx.fillStyle = '#8b5a2b';
+      ctx.fillRect(cx - 9, cy - 10, 18, 9);
+      ctx.fillStyle = '#3a1f08';
+      ctx.fillRect(cx - 6, cy - 7, 12, 1);
+      ctx.fillRect(cx - 6, cy - 4, 8, 1);
+    }
+  }
+
+  function drawPlayer(camX, camY) {
+    const psx = Math.floor(player.x - camX);
+    const psy = Math.floor(player.y - camY);
+    const phase = player.moving ? Math.sin(time * 12) : 0;
+    const bob = player.moving ? Math.abs(phase) * 2 : 0;
+    const sX = 1 + phase * 0.07;
+    const sY = 1 - phase * 0.07;
+    // shadow
+    ctx.fillStyle = 'rgba(0,0,0,0.35)';
+    ctx.beginPath();
+    ctx.ellipse(psx, psy + 9, 9, 4, 0, 0, Math.PI*2);
+    ctx.fill();
+    // body
+    ctx.fillStyle = '#e74c3c';
+    ctx.beginPath();
+    ctx.ellipse(psx, psy - bob, player.r * sX, player.r * sY, 0, 0, Math.PI*2);
+    ctx.fill();
+    ctx.strokeStyle = '#7a1f17';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    // eye
+    ctx.fillStyle = '#fff';
+    ctx.beginPath();
+    ctx.arc(psx + Math.cos(player.dir) * 5, psy - bob + Math.sin(player.dir) * 5, 2.2, 0, Math.PI*2);
+    ctx.fill();
+  }
+
+  // --- Ending: flood colour for each tile type (triggered after shrine) ---
+  // Flood order: WATER(1) → SAND(2) → GRASS(3) → FOREST(4) → ROCK(5)
+  // floodLevel 0..1 maps to 5 stages; each stage takes 0.2 of the 0..1 range
+  function getFloodAlpha(tileType) {
+    if (!floodLevel) return 0;
+    const stageMap = { [T.WATER]:0, [T.SAND]:1, [T.GRASS]:2, [T.FOREST]:3, [T.ROCK]:4 };
+    const stage = stageMap[tileType];
+    if (stage === undefined) return 0;
+    const stageStart = stage * 0.2;
+    const t = (floodLevel - stageStart) / 0.2;
+    return Math.max(0, Math.min(1, t));
+  }
+
+  function draw() {
+    // ---- ENDING SEQUENCE (zoom-out phases) ----
+    if (endPhase && endPhase !== 'rumble') {
+      // Use the exact same deep-ocean colour as LAYER_COLORS[0] so there's no visible square edge
+      ctx.fillStyle = '#0c3556';
+      ctx.fillRect(0, 0, viewW, viewH);
+
+      if (endPhase === 'credits') {
+        ctx.fillStyle = '#000d1a';
+        ctx.fillRect(0, 0, viewW, viewH);
+        // glowing dot deep beneath the waves
+        const pulse = (Math.sin(time * 0.9) + 1) * 0.5;
+        const dotY = viewH * 0.52;
+        const gd = ctx.createRadialGradient(viewW/2, dotY, 0, viewW/2, dotY, 60 + pulse * 20);
+        gd.addColorStop(0, `rgba(255,210,80,${0.55 + pulse * 0.3})`);
+        gd.addColorStop(0.4, `rgba(180,140,30,${0.15 + pulse * 0.1})`);
+        gd.addColorStop(1, 'rgba(0,0,0,0)');
+        ctx.fillStyle = gd;
+        ctx.fillRect(0, 0, viewW, viewH);
+
+        // subtle ocean wave lines
+        ctx.strokeStyle = `rgba(40,80,120,${0.25 + pulse * 0.1})`;
+        ctx.lineWidth = 1;
+        for (let i = 0; i < 6; i++) {
+          const wy = viewH * 0.3 + i * 28 + Math.sin(time * 0.5 + i) * 6;
+          ctx.beginPath(); ctx.moveTo(0, wy); ctx.lineTo(viewW, wy); ctx.stroke();
+        }
+
+        if (creditsAlpha > 0) {
+          ctx.globalAlpha = creditsAlpha;
+          ctx.textAlign = 'center';
+          ctx.fillStyle = '#d4c090';
+          ctx.font = `bold ${Math.round(viewW * 0.055)}px -apple-system, system-ui, sans-serif`;
+          ctx.fillText('THE ISLAND IS GONE.', viewW/2, viewH * 0.25);
+          ctx.globalAlpha = creditsAlpha * 0.85;
+          ctx.font = `${Math.round(viewW * 0.038)}px -apple-system, system-ui, sans-serif`;
+          ctx.fillStyle = '#a09070';
+          ctx.fillText('But you were there.', viewW/2, viewH * 0.25 + viewW * 0.075);
+          ctx.globalAlpha = creditsAlpha * 0.6;
+          ctx.font = `${Math.round(viewW * 0.028)}px -apple-system, system-ui, sans-serif`;
+          ctx.fillStyle = '#6a7a8a';
+          ctx.fillText('— The End —', viewW/2, viewH * 0.25 + viewW * 0.14);
+          ctx.globalAlpha = 1;
+        }
+        return;
+      }
+
+      // Zoom transform: island centre → screen centre
+      ctx.save();
+      ctx.translate(viewW/2 + rumbleX, viewH/2 + rumbleY);
+      ctx.scale(endZoom, endZoom);
+      ctx.translate(-WORLD_W/2, -WORLD_H/2);
+
+      // Full world ground
+      ctx.drawImage(groundCanvas, 0, 0);
+
+      // Water animation on actual water tiles (simplified)
+      for (let y = 0; y < MAP_H; y++) {
+        for (let x = 0; x < MAP_W; x++) {
+          const t = map[y][x];
+          if (t !== T.WATER) continue;
+          const wx = x * TILE, wy = y * TILE;
+          const shimmer = (Math.sin((x*0.6+y*0.3) + time*1.6)+1)*0.5;
+          ctx.fillStyle = `rgba(60,130,200,${0.18 + shimmer*0.12})`;
+          ctx.fillRect(wx, wy, TILE, TILE);
+        }
+      }
+
+      // Flood overlay — tiles submerge wave by wave
+      if (floodLevel > 0) {
+        for (let y = 0; y < MAP_H; y++) {
+          for (let x = 0; x < MAP_W; x++) {
+            const t = map[y][x];
+            const a = getFloodAlpha(t);
+            if (a <= 0) continue;
+            const wx = x * TILE, wy = y * TILE;
+            // Deep ocean colour underneath
+            ctx.fillStyle = `rgba(8,24,50,${a * 0.85})`;
+            ctx.fillRect(wx, wy, TILE, TILE);
+            // Blue-white wave froth at the flood line
+            if (a < 0.7) {
+              const froth = (Math.sin(time*3 + x*0.8 + y*0.5)+1)*0.5;
+              ctx.fillStyle = `rgba(120,190,255,${(0.7-a) * froth * 0.55})`;
+              ctx.fillRect(wx, wy, TILE, 4);
+            }
+          }
+        }
+        // Bubbles / sparkles on the flood surface
+        ctx.fillStyle = `rgba(160,210,255,0.5)`;
+        for (let i = 0; i < 40; i++) {
+          const bx = ((i * 479 + Math.floor(time*30)*131) % WORLD_W);
+          const by = ((i * 317 + Math.floor(time*30)*89) % WORLD_H);
+          const bt = map[Math.floor(by/TILE)] && map[Math.floor(by/TILE)][Math.floor(bx/TILE)];
+          if (bt !== undefined && getFloodAlpha(bt) > 0.4) {
+            ctx.beginPath(); ctx.arc(bx, by, 1.5, 0, Math.PI*2); ctx.fill();
+          }
+        }
+      }
+
+      ctx.restore();
+
+      // Dark ocean fade overlay
+      if (endFade > 0) {
+        ctx.fillStyle = `rgba(0,8,20,${endFade})`;
+        ctx.fillRect(0, 0, viewW, viewH);
+      }
+      return;
+    }
+
+    ctx.fillStyle = '#000';
+    ctx.fillRect(0, 0, viewW, viewH);
+
+    let camX = Math.max(0, Math.min(WORLD_W - viewW, player.x - viewW / 2));
+    let camY = Math.max(0, Math.min(WORLD_H - viewH, player.y - viewH / 2));
+    if (endPhase === 'rumble') { camX += rumbleX; camY += rumbleY; }
+
+    // 1. Blit pre-rendered ground (visible region)
+    const srcX = Math.max(0, Math.floor(camX));
+    const srcY = Math.max(0, Math.floor(camY));
+    const srcW = Math.min(WORLD_W - srcX, Math.ceil(viewW) + 1);
+    const srcH = Math.min(WORLD_H - srcY, Math.ceil(viewH) + 1);
+    const dstX = srcX - camX;
+    const dstY = srcY - camY;
+    ctx.drawImage(groundCanvas, srcX, srcY, srcW, srcH, dstX, dstY, srcW, srcH);
+
+    const startX = Math.max(0, Math.floor(camX / TILE));
+    const startY = Math.max(0, Math.floor(camY / TILE));
+    const endX = Math.min(MAP_W, Math.ceil((camX + viewW) / TILE) + 1);
+    const endY = Math.min(MAP_H, Math.ceil((camY + viewH) / TILE) + 1);
+
+    // 2. Water animation: shimmer + foam at coastline
+    for (let y = startY; y < endY; y++) {
+      for (let x = startX; x < endX; x++) {
+        const t = map[y][x];
+        if (t !== T.WATER && t !== T.DEEP) continue;
+        const sx = Math.floor(x * TILE - camX);
+        const sy = Math.floor(y * TILE - camY);
+        // shimmer band moving across
+        const shimmer = (Math.sin((x * 0.6 + y * 0.3) + time * 1.6) + 1) * 0.5;
+        ctx.fillStyle = `rgba(255,255,255,${(0.03 + shimmer * 0.05).toFixed(3)})`;
+        ctx.fillRect(sx, sy, TILE, TILE);
+        // moving wave streaks
+        if (t === T.WATER) {
+          const w = (Math.sin(x * 0.8 + y * 0.4 + time * 2.2));
+          if (w > 0.6) {
+            ctx.fillStyle = 'rgba(255,255,255,0.18)';
+            ctx.fillRect(sx + 4, sy + (TILE/2 + Math.sin(time + x) * 4), TILE - 8, 1);
+          }
+          // foam at sand edges
+          const foamA = 0.35 + Math.sin(time * 2.5 + x * 0.4 + y * 0.4) * 0.25;
+          if (map[y-1] && map[y-1][x] === T.SAND) {
+            ctx.fillStyle = `rgba(255,255,255,${foamA.toFixed(3)})`;
+            ctx.fillRect(sx + 1, sy, TILE - 2, 2);
+          }
+          if (map[y+1] && map[y+1][x] === T.SAND) {
+            ctx.fillStyle = `rgba(255,255,255,${foamA.toFixed(3)})`;
+            ctx.fillRect(sx + 1, sy + TILE - 2, TILE - 2, 2);
+          }
+          if (map[y][x-1] === T.SAND) {
+            ctx.fillStyle = `rgba(255,255,255,${foamA.toFixed(3)})`;
+            ctx.fillRect(sx, sy + 1, 2, TILE - 2);
+          }
+          if (map[y][x+1] === T.SAND) {
+            ctx.fillStyle = `rgba(255,255,255,${foamA.toFixed(3)})`;
+            ctx.fillRect(sx + TILE - 2, sy + 1, 2, TILE - 2);
+          }
+        }
+      }
+    }
+
+    // 3. Y-sorted dynamic objects: trees, rocks, POIs, player
+    drawables.length = 0;
+    for (let y = startY; y < endY; y++) {
+      for (let x = startX; x < endX; x++) {
+        const t = map[y][x];
+        if (t === T.FOREST) drawables.push({ k: 'tree', x, y, sortY: y * TILE + TILE * 0.85 });
+        else if (t === T.ROCK) drawables.push({ k: 'rock', x, y, sortY: y * TILE + TILE * 0.85 });
+      }
+    }
+    for (const p of pois) {
+      const sx = p.x * TILE, sy = p.y * TILE;
+      if (sx + TILE < camX || sy + TILE < camY || sx > camX + viewW || sy > camY + viewH) continue;
+      drawables.push({ k: 'poi', poi: p, sortY: sy + TILE * 0.85 });
+    }
+    drawables.push({ k: 'player', sortY: player.y + 8 });
+    drawables.sort((a, b) => a.sortY - b.sortY);
+    for (const d of drawables) {
+      if (d.k === 'tree') drawTree(d.x, d.y, camX, camY);
+      else if (d.k === 'rock') drawRockPile(d.x, d.y, camX, camY);
+      else if (d.k === 'poi') drawPOI(d.poi, camX, camY);
+      else if (d.k === 'player') drawPlayer(camX, camY);
+    }
+
+    // 4. Particles (in front of ground, mostly behind player visually but cheap)
+    drawParticles(camX, camY);
+
+    // 5. Shrine ambient light (additive)
+    for (const p of pois) {
+      if (p.kind !== 'shrine') continue;
+      const sx = p.x * TILE + TILE/2 - camX;
+      const sy = p.y * TILE + TILE/2 - camY;
+      if (sx < -150 || sy < -150 || sx > viewW + 150 || sy > viewH + 150) continue;
+      const flicker = (Math.sin(time * 3.1) + Math.sin(time * 5.7)) * 0.5;
+      const baseR = shrineActivated ? 160 : 70;
+      const radius = baseR + flicker * (shrineActivated ? 22 : 10);
+      const intensity = shrineActivated ? 0.65 : 0.42;
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+      const grad = ctx.createRadialGradient(sx, sy + 2, 0, sx, sy + 2, radius);
+      grad.addColorStop(0, `rgba(255, 200, 100, ${intensity})`);
+      grad.addColorStop(0.4, `rgba(255, 180, 80, ${(intensity * 0.4).toFixed(2)})`);
+      grad.addColorStop(1, 'rgba(255, 180, 80, 0)');
+      ctx.fillStyle = grad;
+      ctx.fillRect(sx - radius, sy - radius, radius * 2, radius * 2);
+      ctx.restore();
+    }
+    // Shrine activation flash
+    if (shrineFlash > 0) {
+      ctx.fillStyle = `rgba(255,230,150,${(shrineFlash * 0.7).toFixed(3)})`;
+      ctx.fillRect(0, 0, viewW, viewH);
+    }
+
+    // 6. Interaction prompt
+    const near = nearestPOI();
+    if (near && !currentDialog) {
+      const sx = Math.floor(near.x * TILE - camX) + TILE/2;
+      const sy = Math.floor(near.y * TILE - camY) - 10;
+      const label = isTouch ? 'tap A' : 'press E';
+      ctx.font = '11px -apple-system, system-ui, sans-serif';
+      ctx.textAlign = 'center';
+      const w = ctx.measureText(label).width + 14;
+      ctx.fillStyle = 'rgba(0,0,0,0.75)';
+      ctx.fillRect(sx - w/2, sy - 14, w, 18);
+      ctx.fillStyle = '#ffd57a';
+      ctx.fillText(label, sx, sy - 1);
+    }
+
+    // 7. Inventory display (top-right)
+    const itemLabels = { lure: '🎣 Lure', fishkey: '🔑 Fish Key', coin: '🪙 Coin' };
+    let iy = 14;
+    ctx.font = '13px -apple-system, system-ui, sans-serif';
+    ctx.textAlign = 'right';
+    for (const item of inventory) {
+      const label = itemLabels[item] || item;
+      const w = ctx.measureText(label).width + 14;
+      ctx.fillStyle = 'rgba(0,0,0,0.6)';
+      ctx.fillRect(viewW - w - 6, iy, w, 22);
+      ctx.fillStyle = '#ffd57a';
+      ctx.fillText(label, viewW - 13, iy + 15);
+      iy += 28;
+    }
+
+    // 8. Notification popup (top-centre)
+    if (notification) {
+      const a = Math.min(1, notifTimer, notifTimer / 0.4);
+      ctx.font = 'bold 14px -apple-system, system-ui, sans-serif';
+      ctx.textAlign = 'center';
+      const nw = ctx.measureText(notification).width + 24;
+      ctx.fillStyle = `rgba(0,0,0,${(a * 0.75).toFixed(2)})`;
+      ctx.fillRect(viewW/2 - nw/2, 52, nw, 26);
+      ctx.fillStyle = `rgba(255,220,100,${a.toFixed(2)})`;
+      ctx.fillText(notification, viewW/2, 70);
+    }
+
+    // 9. Vignette
+    const grad = ctx.createRadialGradient(viewW/2, viewH/2, Math.min(viewW,viewH)*0.4, viewW/2, viewH/2, Math.max(viewW,viewH)*0.75);
+    grad.addColorStop(0, 'rgba(0,0,0,0)');
+    grad.addColorStop(1, 'rgba(0,0,0,0.45)');
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, viewW, viewH);
+  }
+
+  // ---------- Game loop ----------
+  let lastT = performance.now();
+  function loop(now) {
+    const dt = Math.min((now - lastT) / 1000, 0.05);
+    lastT = now;
+    time += dt;
+
+    if (!currentDialog) {
+      let mx = 0, my = 0;
+      if (keys['w'] || keys['arrowup'])    my -= 1;
+      if (keys['s'] || keys['arrowdown'])  my += 1;
+      if (keys['a'] || keys['arrowleft'])  mx -= 1;
+      if (keys['d'] || keys['arrowright']) mx += 1;
+      if (joyVec.x || joyVec.y) { mx += joyVec.x; my += joyVec.y; }
+      const mag = Math.hypot(mx, my);
+      if (mag > 0) {
+        if (mag > 1) { mx /= mag; my /= mag; }
+        player.dir = Math.atan2(my, mx);
+        player.moving = true;
+        tryMove(mx * player.speed * dt, my * player.speed * dt);
+      } else {
+        player.moving = false;
+      }
+    } else {
+      player.moving = false;
+    }
+
+    updateParticles(dt);
+    if (shrineFlash > 0) shrineFlash = Math.max(0, shrineFlash - dt * 0.6);
+    if (notifTimer > 0) { notifTimer -= dt; if (notifTimer <= 0) notification = null; }
+    if (interactCooldown > 0) interactCooldown -= dt;
+
+    // ---------- Ending state machine ----------
+    if (endPhase) {
+      endTimer += dt;
+      if (endPhase === 'rumble') {
+        // 2.5 s of screen shake, then zoom out
+        rumbleX = (Math.random() - 0.5) * 8;
+        rumbleY = (Math.random() - 0.5) * 8;
+        if (endTimer >= 2.5) { endPhase = 'zoomout'; endTimer = 0; }
+      } else if (endPhase === 'zoomout') {
+        // 3 s zoom from 1.0 → 0.32
+        const t = Math.min(endTimer / 3.0, 1.0);
+        endZoom = 1.0 - t * (1.0 - 0.32);
+        rumbleX = (Math.random() - 0.5) * (3 * (1 - t));
+        rumbleY = (Math.random() - 0.5) * (3 * (1 - t));
+        if (endTimer >= 3.0) { endPhase = 'sink'; endTimer = 0; rumbleX = 0; rumbleY = 0; }
+      } else if (endPhase === 'sink') {
+        // 9 s of flooding: tile types submerge in order of elevation
+        floodLevel = Math.min(endTimer / 9.0, 1.0);
+        if (endTimer >= 9.0) { endPhase = 'deep'; endTimer = 0; }
+      } else if (endPhase === 'deep') {
+        // 2 s fade everything to dark ocean
+        endFade = Math.min(endTimer / 2.0, 1.0);
+        if (endTimer >= 2.0) { endPhase = 'credits'; endTimer = 0; }
+      } else if (endPhase === 'credits') {
+        creditsAlpha = Math.min(endTimer / 2.5, 1.0);
+      }
+    }
+
+    draw();
+    requestAnimationFrame(loop);
+  }
+  requestAnimationFrame(loop);
+
+  // Dev-only test hook — call window._testEnd() in console to preview the ending
+  window._testEnd = () => { endPhase = 'rumble'; endTimer = 0; endZoom = 1.0; floodLevel = 0; endFade = 0; creditsAlpha = 0; };
+})();
+</script>
+</body>
+</html>
